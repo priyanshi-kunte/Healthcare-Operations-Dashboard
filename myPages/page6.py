@@ -10,32 +10,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 from datetime import datetime
 
-# ── Data loader ────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Loading data...")
-def _load_p6():
-    xls     = pd.ExcelFile("data/dataFinal.xlsx")
-    patients= pd.read_excel(xls, "Patients")
-    appts   = pd.read_excel(xls, "Appointment")
-    bed_rec = pd.read_excel(xls, "BedRecords")
-    bed_df  = pd.read_excel(xls, "Bed")
-    ward_df = pd.read_excel(xls, "Ward")
-    surg    = pd.read_excel(xls, "SurgeryRecord")
-    doctors = pd.read_excel(xls, "Doctor")
-    depts   = pd.read_excel(xls, "Department")
-    nurses  = pd.read_excel(xls, "Nurse")
-
-    appts["appointment_Date"] = pd.to_datetime(appts["appointment_Date"],  errors="coerce")
-    bed_rec["admission_Date"] = pd.to_datetime(bed_rec["admission_Date"],  errors="coerce")
-    bed_rec["discharge_Date"] = pd.to_datetime(bed_rec["discharge_Date"],  errors="coerce")
-    surg["surgery_Date"]      = pd.to_datetime(surg["surgery_Date"],       errors="coerce")
-    bed_rec["LOS"]            = (bed_rec["discharge_Date"] - bed_rec["admission_Date"]).dt.days
-
-    bed_full = (bed_rec
-        .merge(bed_df,  on="bed_No",  how="left")
-        .merge(ward_df, on="ward_No", how="left")
-        .merge(depts,   on="dept_Id", how="left"))
-
-    return patients, appts, bed_rec, bed_full, surg, doctors, depts, nurses
+# Data loading handled centrally in app.py
 
 
 # ── Matplotlib chart helpers ───────────────────────────────────────────────────
@@ -235,8 +210,12 @@ def build_chart(chart_id, patients, appts, bed_rec, bed_full, surg, doctors, dep
         return "Surgery Distribution by Department", fig, None
 
     if chart_id == "p3_heatmap":
-        doc_dept = doctors.merge(depts, on="dept_Id", how="left")[["doct_Id","FName","dept_Name"]]
-        hd = surg.merge(doc_dept, left_on="surgeon_Id", right_on="doct_Id", how="inner").dropna(subset=["FName","dept_Name"])
+        doc_fname = doctors[["doct_Id","FName"]].drop_duplicates()
+        hd = surg.merge(doc_fname, left_on="surgeon_Id", right_on="doct_Id", how="inner")
+        if "dept_Name" not in hd.columns:
+            doc_dept = doctors.merge(depts, on="dept_Id", how="left")[["doct_Id","dept_Name"]].drop_duplicates()
+            hd = hd.merge(doc_dept, on="doct_Id", how="left")
+        hd = hd.dropna(subset=[c for c in ["FName","dept_Name"] if c in hd.columns])
         hc = hd.groupby(["FName","dept_Name"]).size().reset_index(name="Count")
         top10 = hc.groupby("FName")["Count"].sum().nlargest(10).index
         hc  = hc[hc["FName"].isin(top10)]
@@ -274,8 +253,12 @@ def build_chart(chart_id, patients, appts, bed_rec, bed_full, surg, doctors, dep
         return "Nurse Distribution by Department", fig, None
 
     if chart_id == "p5_heatmap":
-        doc_dept = doctors.merge(depts, on="dept_Id", how="left")[["doct_Id","FName","dept_Name"]]
-        merged   = appts.merge(doc_dept, on="doct_Id", how="left").dropna(subset=["FName","dept_Name"])
+        doc_fname = doctors[["doct_Id","FName"]].drop_duplicates()
+        merged = appts.merge(doc_fname, on="doct_Id", how="left")
+        if "dept_Name" not in merged.columns:
+            doc_dept = doctors.merge(depts, on="dept_Id", how="left")[["doct_Id","dept_Name"]].drop_duplicates()
+            merged = merged.merge(doc_dept, on="doct_Id", how="left")
+        merged = merged.dropna(subset=[c for c in ["FName","dept_Name"] if c in merged.columns])
         hc       = merged.groupby(["FName","dept_Name"]).size().reset_index(name="Count")
         top10    = hc.groupby("FName")["Count"].sum().nlargest(10).index
         hc       = hc[hc["FName"].isin(top10)]
@@ -560,7 +543,7 @@ def build_pdf(selected_chart_ids, r_title, r_author, r_dept, r_notes,
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN PAGE
 # ══════════════════════════════════════════════════════════════════════════════
-def run():
+def run(filtered: dict):
     dm = st.session_state.get("dark_mode", False)
 
     PB  = "#60A5FA" if dm else "#1E40AF"
@@ -625,6 +608,14 @@ def run():
             background-color:{input_bg} !important; color:{input_text} !important;
             border:1px solid {input_border} !important;
         }}
+        /* Slider labels: theme-correct color + larger font */
+        .stSlider label p, .stSelectSlider label p,
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] span {{
+            color:{text_color} !important;
+            font-size:16px !important;
+            font-weight:700 !important;
+        }}
         /* Text area placeholder color — visible in both themes */
         .stTextArea textarea::placeholder {{
             color: {"#94A3B8" if dm else "#94A3B8"} !important;
@@ -670,7 +661,19 @@ def run():
     st.markdown("<div class='pg-title'>Intelligence & Capacity Planning</div>", unsafe_allow_html=True)
     st.markdown("<div class='pg-sub'>Capacity Planning Simulator  |  PDF Report Builder  |  Strategic Resource Forecasting</div>", unsafe_allow_html=True)
 
-    patients, appts, bed_rec, bed_full, surg, doctors, depts, nurses = _load_p6()
+    # ── Unpack pre-filtered data ─────────────────────────────────────────────
+    patients = filtered["patients"]
+    appts    = filtered["appointments"]
+    bed_rec  = filtered["bed_records"]
+    bed_full = filtered["bed_full"]
+    surg     = filtered["surgeries"]
+    doctors  = filtered["doctors"]
+    depts    = filtered["departments"]
+    nurses   = filtered["nurses"]
+
+    if appts.empty and bed_rec.empty:
+        st.warning("No data matches the current global filters.")
+        return
 
     # Shared metrics
     n_months    = max(bed_rec["admission_Date"].dt.to_period("M").nunique(), 1)
@@ -792,7 +795,6 @@ def run():
             ("p2_age",           "Age Group Distribution"),
             ("p2_top_cities",    "Top 10 Cities by Patient Count"),
             ("p2_payment",       "Payment Methods"),
-            ("p2_appt_trend",    "Appointment Trend 2024 vs 2025"),
         ],
         "Clinical & Disease Intelligence (Page 3)": [
             ("p3_top_surgeries", "Top 10 Surgical Procedures"),
@@ -908,7 +910,7 @@ def run():
 
         fname = f"Hospital_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
         st.download_button(
-            label="⬇️ Download PDF Report",
+            label="Download PDF Report",
             data=pdf_bytes, file_name=fname, mime="application/pdf",
             use_container_width=True,
         )
